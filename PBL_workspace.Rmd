@@ -13,6 +13,6 @@ library(reticulate)
 
 Goals:
 
-1.  Get mol file from SMILES .
+1.  Get mol file from SMILES .(rdkit)
 
-2.  Get
+2.  Get multiple descriptors by rdkit
