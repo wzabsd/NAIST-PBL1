@@ -1,11 +1,12 @@
 ---
 title: "R Notebook"
 output: html_notebook
+Author: "Wang Zhe"
 ---
 
 Import basic package
 
-```{r}
+```{r include=FALSE}
 library(tidyverse)
 library(reticulate)
 
@@ -16,3 +17,353 @@ Goals:
 1.  Get mol file from SMILES .(rdkit)
 
 2.  Get multiple descriptors by rdkit
+
+#### Convert SMILES to mol format
+
+```{python include=FALSE}
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from rdkit.Chem.Draw import IPythonConsole
+from rdkit.Chem.Draw.MolDrawing import MolDrawing, DrawingOptions
+from rdkit.Chem import Draw
+from rdkit.Chem import Descriptors
+from rdkit.ML.Descriptors import MoleculeDescriptors
+from IPython.core.interactiveshell import InteractiveShell
+import pandas as pd
+import numpy as np
+from pandas_profiling import ProfileReport
+import umap #Dimension reduction and visulization
+#InteractiveShell.ast_node_interactivity = "all"// Jupyter magic command
+```
+
+Load file into pd.dataframe
+
+
+```{python}
+df = pd.read_csv('/home/wzabsd/Desktop/NAIST-PBL1/datasets/3CL_enzymatic_activity-clean.tsv', sep='\t')
+#df.head()
+#profile = ProfileReport(df, title="Pandas Profiling Report")
+```
+
+Since the loaded SMILES strings are different **Canonical SMILES**, so to confirm different represent way will not cause some potential problems in further analysis, here is a small validation example:
+
+```{python}
+DrawingOptions.bondLineWidth=1.8
+mol = Chem.MolFromSmiles('s1c2c(c3c1cccc3)cccc2')
+mol2=Chem.MolFromSmiles('C1=CC=C2C(=C1)C3=CC=CC=C3S2')
+Descriptors.MolLogP(mol)
+Descriptors.MolLogP(mol2)
+#Draw.MolToImage(mol, size=(150,150), kekulize=True)
+```
+
+There is a wrong SMILES data that cannot be transferred into mol format by Rdkit package, so manually replace with canonical SMILES in Pubchem database.
+
+```{python}
+smiles_l=df['washed_SMILES'].tolist()
+smiles_l[smiles_l.index('[i+]1c2c(c3c1cccc3)cccc2')]='C1=CC=C2C(=C1)C3=CC=CC=C3[I+]2'
+mols_l=[Chem.MolFromSmiles(smile) for smile in smiles_l]
+```
+
+Calculate all the possible descriptor
+
+```{python}
+des_l=[des_name[0] for des_name in Descriptors._descList]
+desc_calc = MoleculeDescriptors.MolecularDescriptorCalculator(des_l)
+descriptors = pd.DataFrame([desc_calc.CalcDescriptors(mol) for mol in mols_l])
+descriptors.columns = des_l
+descriptors.index = smiles_l
+```
+
+
+Replace invalid SMILES:
+```{r}
+descriptors_ori=py$descriptors
+View(descriptors_ori)
+screened_compound$washed_SMILES[which(screened_compound$washed_SMILES=="[i+]1c2c(c3c1cccc3)cccc2")]="C1=CC=C2C(=C1)C3=CC=CC=C3[I+]2"
+```
+
+Remove 0 descriptors
+```{r}
+remove_0=function(dataframe,nums){
+  l=c()
+  for (i in colnames(dataframe)) {
+    if (length(dataframe[[i]][dataframe[[i]]!=0])<nums) {
+      l=c(l,i)
+    }
+  }
+  for (i in l) {
+    dataframe[[i]]=NULL
+  }
+  return(dataframe)
+}
+descriptors_ori=remove_0(descriptors_ori,1)#remove all_0 features
+```
+
+Replace NA data in screened_compound dataframe
+```{r}
+screened_compound$mean_pAC50[is.na(screened_compound$mean_pAC50)]=0
+screened_compound$EFFICACY[is.na(screened_compound$EFFICACY)]='drop'
+```
+
+Match label data and remove *no efficacy data*
+```{r}
+descriptors_ori$SMILES=row.names(descriptors_ori)
+
+for (i in descriptors_ori$SMILES){
+  descriptors_ori$mean_pAC50[which(descriptors_ori$SMILES==i)]=screened_compound$mean_pAC50[which(screened_compound$washed_SMILES==i)]
+  descriptors_ori$Class[which(descriptors_ori$SMILES==i)]=screened_compound$Class[which(screened_compound$washed_SMILES==i)]
+  descriptors_ori$efficacy[which(descriptors_ori$SMILES==i)]=screened_compound$EFFICACY[which(screened_compound$washed_SMILES==i)]
+}
+descriptors_ori=descriptors_ori%>%filter(efficacy!='drop')#remove
+```
+
+Remove *NaN*-included feature
+```{r}
+l=c()
+for (i in 1:dim(descriptors_ori)[2]) {
+  if (NaN%in%descriptors_ori[,i]) {
+    l=c(l,i)
+  }
+}
+descriptors_ori=descriptors_ori[,-unique(l)]
+```
+
+
+
+Calculate average efficacy
+```{r}
+for (i in 1:dim(descriptors_ori)[1]) {
+  descriptors_ori$efficacy[i]=mean(as.numeric(str_split(descriptors_ori$efficacy[i],"&")[[1]]))
+}
+descriptors_ori$mean_pAC50=as.numeric(descriptors_ori$mean_pAC50)
+descriptors_ori$efficacy=as.numeric(descriptors_ori$efficacy)#convert to numeric data
+```
+
+
+Data Standardization(z-score)
+```{r}
+library(vegan)
+descriptors=descriptors_ori
+descriptors[,1:191]=decostand(descriptors[,1:191],method="standardize",MARGIN = 2)
+```
+
+Feature selection by *information.gain* (`mlr` and `FSelectorRcpp`)
+```{r}
+set.seed(2021)
+library(mlr3verse)
+descriptors2train=descriptors[,-c(195,193,192)]
+descriptors2train$Class=as.factor(descriptors2train$Class)
+task_train = as_task_classif(descriptors2train, target = "Class",positive = "Active")
+```
+
+xgboost features selection
+```{r}
+set.seed(2021)
+library(mlr3verse)
+lrn=lrn("classif.xgboost",booster="gbtree",tree_method="exact",nthread=16,nrounds=100,max_depth=8)
+search_space = ps(
+  min_child_weight = p_dbl(lower = 1, upper = 6),
+  gamma=p_dbl(lower = 0,upper = 0.5),
+  subsample=p_dbl(lower = 0.7,upper = 1),
+  colsample_bytree=p_dbl(lower = 0.7,upper = 1),
+  alpha=p_dbl(lower = 0,upper = 100),
+  eta=p_dbl(lower = 0.05,upper = 0.3)
+)
+terminator = trm("evals", n_evals = 500)
+tuner = tnr("nloptr", algorithm = "NLOPT_LN_BOBYQA")
+
+at = AutoTuner$new(
+  learner = lrn,
+  resampling = rsmp("insample"),
+  measure = msr("classif.ce"),
+  search_space = search_space,
+  terminator = terminator,
+  tuner = tuner
+)
+```
+
+```{r}
+at1$train(task_train)
+```
+
+```{r}
+at$archive$best()
+at1$archive$best()
+```
+
+
+```{r}
+learner=lrn("classif.xgboost",booster="gbtree",tree_method="exact",nthread=16,nrounds=700,max_depth=8,min_child_weight=1.95,gamma=0.38,subsample=0.93,colsample_bytree=0.788,alpha=0.365,eta=0.216)
+```
+
+```{r}
+learner=lrn("classif.xgboost",booster="gbtree",tree_method="exact",nthread=16,nrounds=700,max_depth=8,min_child_weight=5.024391,gamma=0.1071455,subsample=0.9405026,colsample_bytree=0.7074007,alpha=8.432256,eta=0.1628942)
+```
+
+```{r}
+learner$predict_type = "response"
+learner$train(task_train)
+```
+```{r}
+prediction1 = learner$predict(task_train)
+
+prediction1$score(msr("classif.acc"))
+prediction1$score(msr("classif.sensitivity"))
+prediction1$score(msr("classif.ppv"))
+prediction1$score(msr("classif.specificity"))
+prediction1$score(msr("classif.npv"))
+prediction1$score(msr("classif.fnr"))
+prediction1$score(msr("classif.recall"))
+prediction1$score(msr("classif.precision"))
+
+
+
+
+#autoplot(prediction1)
+```
+```{r}
+design = benchmark_grid(
+  tasks = task_train,
+  learners = lrns(c(learner,"classif.featureless"))
+  )
+bmr=benchmark(design)
+autoplot(bmr, type = "roc")
+```
+
+
+
+```{r}
+prediction = at$predict(task_train)
+autoplot(prediction)
+```
+
+
+
+```{r}
+descriptors_ori$Class=as.factor(descriptors_ori$Class)
+descriptors_ori$Ipc=NULL
+descriptors_ori[,1:190]=decostand(descriptors_ori[,1:190],method="range")
+task_train1 = as_task_classif(descriptors_ori[,-c(194,192,191)], target = "Class",positive = "Active")
+filter1 = flt("variance")
+filter1$calculate(task_train1)
+classif_output_CV=as.data.table(filter1)
+```
+
+
+```{r include=FALSE}
+for (i in 1:dim(classif_output_CV)[1]) {
+  classif_output_CV$uni_num[i]=length(unique(descriptors2train[[classif_output_CV$feature[i]]]))
+}#how many unique data in this feature
+```
+
+```{r}
+feature_list_xg=subset(classif_output,score>0.01)$feature
+descriptors_selected=descriptors_ori[,c(feature_list,"Class")]
+```
+
+
+```{python}
+from sklearn.datasets import load_digits
+import matplotlib.pyplot as plt
+
+digits = load_digits()
+fig, ax_array = plt.subplots(20, 20)
+axes = ax_array.flatten()
+for i, ax in enumerate(axes):
+    ax.imshow(digits.images[i], cmap='gray_r')
+plt.setp(axes, xticks=[], yticks=[], frame_on=False)
+plt.tight_layout(h_pad=0.5, w_pad=0.01)
+plt.show()
+reducer = umap.UMAP(random_state=42)
+embedding = reducer.fit_transform(digits.data)
+print(embedding.shape)
+
+plt.scatter(embedding[:, 0], embedding[:, 1], c=digits.target, cmap='Spectral', s=5)
+plt.gca().set_aspect('equal', 'datalim')
+plt.colorbar(boundaries=np.arange(11)-0.5).set_ticks(np.arange(10))
+plt.title('UMAP projection of the Digits dataset')
+plt.show()
+```
+
+
+PCA
+```{r}
+descriptors_selected=descriptors[,c(feature_list,"SMILES","mean_pAC50","efficacy","Class")]
+```
+
+
+
+```{r}
+library(psych)
+pca1 =fa.parallel(descriptors_selected[,1:52],fa = "pc",n.iter=3)
+#pca
+```
+
+
+
+
+
+
+```{python}
+import pandas as pd
+from matplotlib.mlab import PCA
+import matplotlib.pyplot as plt
+import sklearn
+from pandas import DataFrame
+from sklearn.model_selection import train_test_split
+from sklearn import svm
+import numpy as np
+from sklearn.metrics import mean_squared_error
+```
+```{python}
+
+dataframe=pd.DataFrame(r.descriptors)
+pca1=PCA(dataframe.drop(['smiles'],axis=1))
+plt.rcParams["figure.figsize"] = [15, 15]
+plt.style.use('ggplot')
+fig = plt.figure()
+ax = fig.add_subplot(111)
+ax.set_title('Ghrelin Receptor Homo sapiens PCA')
+ax.set_xlabel('PC1')
+ax.set_ylabel('PC2')
+X = [x[0] for x in pca1.Y]
+Y = [y[1] for y in pca1.Y]
+plt.scatter(X,Y)
+plt.show()
+```
+
+ML analysis random 
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
