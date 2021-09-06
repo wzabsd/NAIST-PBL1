@@ -156,54 +156,148 @@ descriptors2train$Class=as.factor(descriptors2train$Class)
 task_train = as_task_classif(descriptors2train, target = "Class",positive = "Active")
 ```
 
-xgboost features selection
+```{r}
+library(ROSE)
+descriptors2train_balanced_both=ovun.sample(Class ~ ., data = descriptors2train, method = "both", p=0.5, N=10000, seed = 2021)$data
+task_train_balanced_both = as_task_classif(descriptors2train_balanced_both, target = "Class",positive = "Active")
+```
+
+
 ```{r}
 set.seed(2021)
 library(mlr3verse)
-lrn=lrn("classif.xgboost",booster="gbtree",tree_method="exact",nthread=16,nrounds=100,max_depth=8)
+lrn=lrn("classif.xgboost",booster="gbtree",nthread=16,nrounds=100)
 search_space = ps(
+  max_depth=p_int(lower = 3, upper = 10),
   min_child_weight = p_dbl(lower = 1, upper = 6),
   gamma=p_dbl(lower = 0,upper = 0.5),
   subsample=p_dbl(lower = 0.7,upper = 1),
   colsample_bytree=p_dbl(lower = 0.7,upper = 1),
-  alpha=p_dbl(lower = 0,upper = 100),
   eta=p_dbl(lower = 0.05,upper = 0.3)
 )
-terminator = trm("evals", n_evals = 500)
-tuner = tnr("nloptr", algorithm = "NLOPT_LN_BOBYQA")
+terminator = trm("evals", n_evals = 100)
+tuner = tnr("random_search")
 
-at = AutoTuner$new(
+at_pre = AutoTuner$new(
   learner = lrn,
-  resampling = rsmp("insample"),
+  resampling = rsmp("cv",folds=5),
   measure = msr("classif.ce"),
   search_space = search_space,
   terminator = terminator,
   tuner = tuner
 )
+at_pre$train(task_train)
 ```
 
 ```{r}
-at1$train(task_train)
+set.seed(2021)
+library(mlr3verse)
+lrn=lrn("classif.xgboost",booster="gbtree",nthread=16,nrounds=100)
+search_space = ps(
+  max_depth=p_int(lower = 3, upper = 10),
+  min_child_weight = p_dbl(lower = 1, upper = 6),
+  gamma=p_dbl(lower = 0,upper = 0.5),
+  subsample=p_dbl(lower = 0.7,upper = 1),
+  colsample_bytree=p_dbl(lower = 0.7,upper = 1),
+  eta=p_dbl(lower = 0.05,upper = 0.3)
+)
+terminator = trm("evals", n_evals = 100)
+tuner = tnr("random_search")
+
+at_balanced_both = AutoTuner$new(
+  learner = lrn,
+  resampling = rsmp("cv",folds=5),
+  measure = msr("classif.ce"),
+  search_space = search_space,
+  terminator = terminator,
+  tuner = tuner
+)
+at_balanced_both$train(task_train_balanced_both)
 ```
 
+
+
 ```{r}
-at$archive$best()
-at1$archive$best()
+at_pre$archive$best()
+at_rand$archive$best()
 ```
 
 
 ```{r}
-learner=lrn("classif.xgboost",booster="gbtree",tree_method="exact",nthread=16,nrounds=700,max_depth=8,min_child_weight=1.95,gamma=0.38,subsample=0.93,colsample_bytree=0.788,alpha=0.365,eta=0.216)
+learner=lrn("classif.xgboost",booster="gbtree",nthread=16,nrounds=1200,max_depth=9,min_child_weight=1.028848,gamma=0.186212,subsample=0.8916424,colsample_bytree=0.7053763,eta=0.268413)
+resampling = rsmp("cv", folds = 5)
+rr_balanced = resample(task_train, learner, resampling, store_models = TRUE)
 ```
 
+
 ```{r}
-learner=lrn("classif.xgboost",booster="gbtree",tree_method="exact",nthread=16,nrounds=700,max_depth=8,min_child_weight=5.024391,gamma=0.1071455,subsample=0.9405026,colsample_bytree=0.7074007,alpha=8.432256,eta=0.1628942)
+rr$aggregate(msr("classif.acc"))
+rr$aggregate(msr("classif.sensitivity"))
+rr$aggregate(msr("classif.ppv"))
+rr$aggregate(msr("classif.specificity"))
+rr$aggregate(msr("classif.npv"))
+rr$aggregate(msr("classif.fnr"))
+rr$aggregate(msr("classif.recall"))
+rr$aggregate(msr("classif.precision"))
+```
+
+
+
+```{r}
+rr_balanced$aggregate(msr("classif.acc"))
+rr_balanced$aggregate(msr("classif.sensitivity"))
+rr_balanced$aggregate(msr("classif.ppv"))
+rr_balanced$aggregate(msr("classif.specificity"))
+rr_balanced$aggregate(msr("classif.npv"))
+rr_balanced$aggregate(msr("classif.fnr"))
+rr_balanced$aggregate(msr("classif.recall"))
+rr_balanced$aggregate(msr("classif.precision"))
+```
+
+
+
+
+
+
+
+```{r}
+learner1=lrn("classif.xgboost",booster="gbtree",tree_method="exact",nthread=16,nrounds=1200)
 ```
 
 ```{r}
 learner$predict_type = "response"
 learner$train(task_train)
 ```
+
+
+
+```{r}
+learner1$predict_type = "response"
+learner1$train(task_train)
+prediction2 = learner$predict(task_train)
+```
+
+```{r}
+prediction2 = learner$predict(task_train)
+
+prediction2$score(msr("classif.acc"))
+prediction2$score(msr("classif.sensitivity"))
+prediction2$score(msr("classif.ppv"))
+prediction2$score(msr("classif.specificity"))
+prediction2$score(msr("classif.npv"))
+prediction2$score(msr("classif.fnr"))
+prediction2$score(msr("classif.recall"))
+prediction2$score(msr("classif.precision"))
+
+
+
+
+autoplot(prediction2)
+```
+
+
+
+
 ```{r}
 prediction1 = learner$predict(task_train)
 
@@ -219,7 +313,7 @@ prediction1$score(msr("classif.precision"))
 
 
 
-#autoplot(prediction1)
+autoplot(prediction1)
 ```
 ```{r}
 design = benchmark_grid(
